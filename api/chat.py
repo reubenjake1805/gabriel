@@ -8,6 +8,7 @@ warm conversational answer.
 
 import logging
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
 import anthropic
 
@@ -85,8 +86,9 @@ class ChatHandler:
                     })
 
         # Build the prompt for Claude
-        now = datetime.now(timezone.utc)
-        time_context = now.strftime("%A, %B %d, %Y at %-I:%M %p UTC")
+        local_tz = ZoneInfo(config.LOCAL_TIMEZONE)
+        now = datetime.now(local_tz)
+        time_context = now.strftime("%A, %B %d, %Y at %-I:%M %p IST")
 
         user_message = f"""Current time: {time_context}
 

@@ -8,6 +8,7 @@ when it was really one 18-minute grooming session.
 
 import logging
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import config
 
@@ -211,9 +212,11 @@ def _minutes_between(ts1: str, ts2: str) -> float:
 
 
 def _format_time(iso_timestamp: str) -> str:
-    """Format an ISO timestamp as a readable time like '2:30 PM'."""
+    """Format an ISO timestamp as a readable local time like '2:30 AM'."""
     try:
         dt = datetime.fromisoformat(iso_timestamp)
-        return dt.strftime("%-I:%M %p")
+        local_tz = ZoneInfo(config.LOCAL_TIMEZONE)
+        dt_local = dt.astimezone(local_tz)
+        return dt_local.strftime("%-I:%M %p")
     except (ValueError, TypeError):
         return iso_timestamp
