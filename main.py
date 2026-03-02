@@ -2,17 +2,18 @@
 Gabriel — Main Entry Point
 
 Starts the camera capture pipeline, filter system, vision analyzer,
-and stores events in SQLite.
+SQLite storage, and API server.
 """
 
 import sys
 import signal
 import logging
 import threading
-import time
 
 from dotenv import load_dotenv
 load_dotenv()  # Load .env before importing config
+
+import uvicorn
 
 import config
 from capture.camera import CaptureManager
@@ -20,6 +21,7 @@ from capture.filters import FrameFilter, FilteredFrame, FrameType
 from analysis.vision import VisionAnalyzer
 from storage.database import EventDB
 from storage.frames import FrameStore
+from api.server import create_app
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -119,7 +121,6 @@ def handle_accepted_frame(filtered: FilteredFrame):
         with _stats_lock:
             _stats["concerns"] += 1
 
-        # Get ring buffer from the camera
         camera = _capture_manager.get_camera(filtered.frame.camera_name)
         if camera:
             ring_frames = camera.get_ring_buffer()
@@ -148,8 +149,6 @@ def handle_accepted_frame(filtered: FilteredFrame):
 
     logger.debug(f"[{filtered.frame.camera_name}] Event #{event_id} stored")
 
-    # TODO: Trigger alert dispatcher on concern events (Step 5)
-
 
 # ---------------------------------------------------------------------------
 # Periodic cleanup
@@ -158,7 +157,6 @@ def handle_accepted_frame(filtered: FilteredFrame):
 def cleanup_loop(shutdown_event: threading.Event):
     """Periodically clean up old frames."""
     while not shutdown_event.is_set():
-        # Run cleanup every hour
         shutdown_event.wait(timeout=3600)
         if not shutdown_event.is_set():
             try:
@@ -178,10 +176,15 @@ def main():
     logger.info("  Gabriel — Starting up")
     logger.info("=" * 60)
 
-    # Validate API key
+    # Validate API keys
     if not config.GEMINI_API_KEY:
         logger.error("GEMINI_API_KEY not set. Add it to your .env file.")
         sys.exit(1)
+    if not config.ANTHROPIC_API_KEY:
+        logger.warning(
+            "ANTHROPIC_API_KEY not set. Chat endpoint will not work. "
+            "Add it to your .env file."
+        )
 
     # Ensure storage directories exist
     config.BASE_DIR.mkdir(parents=True, exist_ok=True)
@@ -198,7 +201,6 @@ def main():
     _capture_manager.start_all()
 
     # Start filter pipeline for each camera
-    filter_threads = []
     for name, camera in _capture_manager.cameras.items():
         filt = FrameFilter(camera)
         filt.set_callback(handle_accepted_frame)
@@ -209,7 +211,6 @@ def main():
             daemon=True,
         )
         t.start()
-        filter_threads.append(t)
         logger.info(f"Filter pipeline started for camera: {name}")
 
     # Start cleanup thread
@@ -238,21 +239,38 @@ def main():
     logger.info(f"Burst threshold: {config.BURST_MOTION_THRESHOLD}%")
     logger.info(f"Database: {config.DB_PATH}")
     logger.info(f"Frames: {config.FRAMES_DIR}")
+    logger.info(f"API server: http://{config.API_HOST}:{config.API_PORT}")
 
-    # Block until shutdown
-    shutdown_event.wait()
+    # Create and start the API server
+    app = create_app(
+        db=_db,
+        capture_manager=_capture_manager,
+        analyzer=_analyzer,
+    )
 
-    # Cleanup
-    logger.info("Shutting down...")
-    _capture_manager.stop_all()
-    _db.close()
+    # Run uvicorn — this blocks until shutdown
+    # Using log_level="warning" to avoid duplicate logs from uvicorn
+    try:
+        uvicorn.run(
+            app,
+            host=config.API_HOST,
+            port=config.API_PORT,
+            log_level="warning",
+        )
+    except KeyboardInterrupt:
+        pass
+    finally:
+        logger.info("Shutting down...")
+        shutdown_event.set()
+        _capture_manager.stop_all()
+        _db.close()
 
-    logger.info("Final stats:")
-    with _stats_lock:
-        for key, val in _stats.items():
-            logger.info(f"  {key}: {val}")
+        logger.info("Final stats:")
+        with _stats_lock:
+            for key, val in _stats.items():
+                logger.info(f"  {key}: {val}")
 
-    logger.info("Gabriel stopped. Goodbye!")
+        logger.info("Gabriel stopped. Goodbye!")
 
 
 if __name__ == "__main__":
