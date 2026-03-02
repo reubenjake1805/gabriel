@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+config_local.py
+frames/
+*.db
+*.db-journal
+*.db-wal
+audio_clips/
+.DS_Store
+*.log
