@@ -2,7 +2,7 @@
 Gabriel — Main Entry Point
 
 Starts the camera capture pipeline, filter system, vision analyzer,
-SQLite storage, and API server.
+SQLite storage, alert dispatcher, and API server.
 """
 
 import sys
@@ -21,6 +21,7 @@ from capture.filters import FrameFilter, FilteredFrame, FrameType
 from analysis.vision import VisionAnalyzer
 from storage.database import EventDB
 from storage.frames import FrameStore
+from alerts.dispatcher import AlertDispatcher
 from api.server import create_app
 
 # ---------------------------------------------------------------------------
@@ -61,10 +62,11 @@ _analyzer: VisionAnalyzer = None
 _db: EventDB = None
 _frame_store: FrameStore = None
 _capture_manager: CaptureManager = None
+_alert_dispatcher: AlertDispatcher = None
 
 
 # ---------------------------------------------------------------------------
-# Frame handler — analyze, save, and store
+# Frame handler — analyze, save, store, and alert
 # ---------------------------------------------------------------------------
 
 def handle_accepted_frame(filtered: FilteredFrame):
@@ -73,7 +75,7 @@ def handle_accepted_frame(filtered: FilteredFrame):
     1. Send frame to Gemini for analysis
     2. Save frame to disk
     3. Store event in SQLite
-    4. If concern event, flush ring buffer
+    4. If concern event, flush ring buffer + send alert
     """
     ft = filtered.frame_type.name.lower()
 
@@ -114,13 +116,14 @@ def handle_accepted_frame(filtered: FilteredFrame):
         frame_type=ft,
     )
 
-    # 3. Check for concern event → flush ring buffer
+    # 3. Check for concern event → flush ring buffer + alert
     context_frames_dir = None
     concern = result.get("concern_level", "none")
     if concern in ("medium", "high"):
         with _stats_lock:
             _stats["concerns"] += 1
 
+        # Flush ring buffer
         camera = _capture_manager.get_camera(filtered.frame.camera_name)
         if camera:
             ring_frames = camera.get_ring_buffer()
@@ -130,6 +133,13 @@ def handle_accepted_frame(filtered: FilteredFrame):
                     camera_name=filtered.frame.camera_name,
                     trigger_timestamp=filtered.frame.timestamp,
                 )
+
+        # Send Telegram alert
+        _alert_dispatcher.on_concern_event(
+            analysis=result,
+            camera=filtered.frame.camera_name,
+            timestamp=filtered.frame.timestamp,
+        )
 
     # 4. Store event in SQLite
     event_id = _db.insert_event(
@@ -170,7 +180,7 @@ def cleanup_loop(shutdown_event: threading.Event):
 # ---------------------------------------------------------------------------
 
 def main():
-    global _analyzer, _db, _frame_store, _capture_manager
+    global _analyzer, _db, _frame_store, _capture_manager, _alert_dispatcher
 
     logger.info("=" * 60)
     logger.info("  Gabriel — Starting up")
@@ -194,7 +204,11 @@ def main():
     _analyzer = VisionAnalyzer()
     _db = EventDB()
     _frame_store = FrameStore()
+    _alert_dispatcher = AlertDispatcher(_db)
     logger.info("All components initialized")
+
+    # Send a test alert on startup
+    _alert_dispatcher.send_test_alert()
 
     # Start cameras
     _capture_manager = CaptureManager()
@@ -213,8 +227,10 @@ def main():
         t.start()
         logger.info(f"Filter pipeline started for camera: {name}")
 
-    # Start cleanup thread
+    # Start background threads
     shutdown_event = threading.Event()
+
+    # Cleanup thread
     cleanup_thread = threading.Thread(
         target=cleanup_loop,
         args=(shutdown_event,),
@@ -222,6 +238,15 @@ def main():
         daemon=True,
     )
     cleanup_thread.start()
+
+    # Inactivity monitor thread
+    inactivity_thread = threading.Thread(
+        target=_alert_dispatcher.start_inactivity_monitor,
+        args=(shutdown_event,),
+        name="inactivity-monitor",
+        daemon=True,
+    )
+    inactivity_thread.start()
 
     # Graceful shutdown on Ctrl+C
     def signal_handler(sig, frame):
@@ -248,8 +273,6 @@ def main():
         analyzer=_analyzer,
     )
 
-    # Run uvicorn — this blocks until shutdown
-    # Using log_level="warning" to avoid duplicate logs from uvicorn
     try:
         uvicorn.run(
             app,
