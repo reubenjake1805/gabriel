@@ -1,14 +1,15 @@
 """
 Gabriel — Main Entry Point
 
-Starts the camera capture pipeline, filter system, and vision analyzer.
-Later phases will also start the API server and alert dispatcher here.
+Starts the camera capture pipeline, filter system, vision analyzer,
+and stores events in SQLite.
 """
 
 import sys
 import signal
 import logging
 import threading
+import time
 
 from dotenv import load_dotenv
 load_dotenv()  # Load .env before importing config
@@ -17,6 +18,8 @@ import config
 from capture.camera import CaptureManager
 from capture.filters import FrameFilter, FilteredFrame, FrameType
 from analysis.vision import VisionAnalyzer
+from storage.database import EventDB
+from storage.frames import FrameStore
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -41,6 +44,7 @@ _stats = {
     "frames_burst": 0,
     "gemini_calls": 0,
     "gemini_failures": 0,
+    "events_stored": 0,
     "lee_visible": 0,
     "concerns": 0,
 }
@@ -48,17 +52,26 @@ _stats_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
-# Frame handler — sends accepted frames to Gemini
+# Global instances (initialized in main)
 # ---------------------------------------------------------------------------
 
-# Global analyzer instance (initialized in main)
 _analyzer: VisionAnalyzer = None
+_db: EventDB = None
+_frame_store: FrameStore = None
+_capture_manager: CaptureManager = None
 
+
+# ---------------------------------------------------------------------------
+# Frame handler — analyze, save, and store
+# ---------------------------------------------------------------------------
 
 def handle_accepted_frame(filtered: FilteredFrame):
     """
     Called every time a frame passes the filter pipeline.
-    Sends the frame to Gemini for analysis and logs the result.
+    1. Send frame to Gemini for analysis
+    2. Save frame to disk
+    3. Store event in SQLite
+    4. If concern event, flush ring buffer
     """
     ft = filtered.frame_type.name.lower()
 
@@ -71,7 +84,7 @@ def handle_accepted_frame(filtered: FilteredFrame):
         f"type={ft}  motion={filtered.motion_score:.1f}%"
     )
 
-    # Send to Gemini for analysis
+    # 1. Send to Gemini for analysis
     result = _analyzer.analyze_frame(
         filtered.frame.image,
         camera_name=filtered.frame.camera_name,
@@ -86,20 +99,72 @@ def handle_accepted_frame(filtered: FilteredFrame):
         logger.warning(f"[{filtered.frame.camera_name}] Analysis failed, skipping")
         return
 
-    # Track stats
-    with _stats_lock:
-        if result.get("lee_visible"):
-            _stats["lee_visible"] += 1
-        if result.get("concern_level") in ("medium", "high"):
-            _stats["concerns"] += 1
-
     # Log the activity detail
     detail = result.get("activity_detail", "")
     if detail:
         logger.info(f"[{filtered.frame.camera_name}] → {detail}")
 
-    # TODO: Save to SQLite (Step 3)
+    # 2. Save frame to disk
+    frame_path = _frame_store.save_frame(
+        image=filtered.frame.image,
+        camera_name=filtered.frame.camera_name,
+        timestamp=filtered.frame.timestamp,
+        frame_type=ft,
+    )
+
+    # 3. Check for concern event → flush ring buffer
+    context_frames_dir = None
+    concern = result.get("concern_level", "none")
+    if concern in ("medium", "high"):
+        with _stats_lock:
+            _stats["concerns"] += 1
+
+        # Get ring buffer from the camera
+        camera = _capture_manager.get_camera(filtered.frame.camera_name)
+        if camera:
+            ring_frames = camera.get_ring_buffer()
+            if ring_frames:
+                context_frames_dir = _frame_store.save_ring_buffer(
+                    frames=ring_frames,
+                    camera_name=filtered.frame.camera_name,
+                    trigger_timestamp=filtered.frame.timestamp,
+                )
+
+    # 4. Store event in SQLite
+    event_id = _db.insert_event(
+        timestamp=filtered.frame.timestamp,
+        camera=filtered.frame.camera_name,
+        frame_type=ft,
+        analysis=result,
+        frame_path=frame_path,
+        context_frames_dir=context_frames_dir,
+        motion_score=filtered.motion_score,
+    )
+
+    with _stats_lock:
+        _stats["events_stored"] += 1
+        if result.get("lee_visible"):
+            _stats["lee_visible"] += 1
+
+    logger.debug(f"[{filtered.frame.camera_name}] Event #{event_id} stored")
+
     # TODO: Trigger alert dispatcher on concern events (Step 5)
+
+
+# ---------------------------------------------------------------------------
+# Periodic cleanup
+# ---------------------------------------------------------------------------
+
+def cleanup_loop(shutdown_event: threading.Event):
+    """Periodically clean up old frames."""
+    while not shutdown_event.is_set():
+        # Run cleanup every hour
+        shutdown_event.wait(timeout=3600)
+        if not shutdown_event.is_set():
+            try:
+                _frame_store.cleanup_old_frames()
+            except Exception as e:
+                logger.error(f"Frame cleanup error: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +172,7 @@ def handle_accepted_frame(filtered: FilteredFrame):
 # ---------------------------------------------------------------------------
 
 def main():
-    global _analyzer
+    global _analyzer, _db, _frame_store, _capture_manager
 
     logger.info("=" * 60)
     logger.info("  Gabriel — Starting up")
@@ -122,17 +187,19 @@ def main():
     config.BASE_DIR.mkdir(parents=True, exist_ok=True)
     config.FRAMES_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Initialize vision analyzer
+    # Initialize components
     _analyzer = VisionAnalyzer()
-    logger.info("Gemini vision analyzer ready")
+    _db = EventDB()
+    _frame_store = FrameStore()
+    logger.info("All components initialized")
 
     # Start cameras
-    capture_manager = CaptureManager()
-    capture_manager.start_all()
+    _capture_manager = CaptureManager()
+    _capture_manager.start_all()
 
     # Start filter pipeline for each camera
     filter_threads = []
-    for name, camera in capture_manager.cameras.items():
+    for name, camera in _capture_manager.cameras.items():
         filt = FrameFilter(camera)
         filt.set_callback(handle_accepted_frame)
 
@@ -145,9 +212,17 @@ def main():
         filter_threads.append(t)
         logger.info(f"Filter pipeline started for camera: {name}")
 
-    # Graceful shutdown on Ctrl+C
+    # Start cleanup thread
     shutdown_event = threading.Event()
+    cleanup_thread = threading.Thread(
+        target=cleanup_loop,
+        args=(shutdown_event,),
+        name="frame-cleanup",
+        daemon=True,
+    )
+    cleanup_thread.start()
 
+    # Graceful shutdown on Ctrl+C
     def signal_handler(sig, frame):
         logger.info("Shutdown signal received")
         shutdown_event.set()
@@ -156,18 +231,21 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
 
     logger.info("Gabriel is running. Press Ctrl+C to stop.")
-    logger.info(f"Cameras: {list(capture_manager.cameras.keys())}")
+    logger.info(f"Cameras: {list(_capture_manager.cameras.keys())}")
     logger.info(f"Motion threshold: {config.MOTION_THRESHOLD}%")
     logger.info(f"Dedup threshold: {config.DEDUP_THRESHOLD}")
     logger.info(f"Heartbeat interval: {config.HEARTBEAT_INTERVAL}s")
     logger.info(f"Burst threshold: {config.BURST_MOTION_THRESHOLD}%")
+    logger.info(f"Database: {config.DB_PATH}")
+    logger.info(f"Frames: {config.FRAMES_DIR}")
 
     # Block until shutdown
     shutdown_event.wait()
 
     # Cleanup
     logger.info("Shutting down...")
-    capture_manager.stop_all()
+    _capture_manager.stop_all()
+    _db.close()
 
     logger.info("Final stats:")
     with _stats_lock:
