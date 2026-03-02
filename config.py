@@ -43,7 +43,7 @@ BURST_ANALYZE_COUNT = 6         # burst frames sent to Gemini (rest saved to dis
 # Vision API (Gemini)
 # ---------------------------------------------------------------------------
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_MODEL = "gemini-2.5-flash"
 FRAME_JPEG_QUALITY = 85         # JPEG quality for frames sent to API
 
 # ---------------------------------------------------------------------------

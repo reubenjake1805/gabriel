@@ -1,7 +1,7 @@
 """
 Gabriel — Main Entry Point
 
-Starts the camera capture pipeline and filter system.
+Starts the camera capture pipeline, filter system, and vision analyzer.
 Later phases will also start the API server and alert dispatcher here.
 """
 
@@ -10,9 +10,13 @@ import signal
 import logging
 import threading
 
+from dotenv import load_dotenv
+load_dotenv()  # Load .env before importing config
+
 import config
 from capture.camera import CaptureManager
-from capture.filters import FrameFilter, FilteredFrame
+from capture.filters import FrameFilter, FilteredFrame, FrameType
+from analysis.vision import VisionAnalyzer
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -27,31 +31,75 @@ logger = logging.getLogger("gabriel")
 
 
 # ---------------------------------------------------------------------------
-# Frame handler (placeholder — will be replaced by Gemini analyzer)
+# Stats tracking
 # ---------------------------------------------------------------------------
 
-_frame_counter = {"total": 0, "motion": 0, "heartbeat": 0, "burst": 0}
+_stats = {
+    "frames_captured": 0,
+    "frames_motion": 0,
+    "frames_heartbeat": 0,
+    "frames_burst": 0,
+    "gemini_calls": 0,
+    "gemini_failures": 0,
+    "lee_visible": 0,
+    "concerns": 0,
+}
+_stats_lock = threading.Lock()
+
+
+# ---------------------------------------------------------------------------
+# Frame handler — sends accepted frames to Gemini
+# ---------------------------------------------------------------------------
+
+# Global analyzer instance (initialized in main)
+_analyzer: VisionAnalyzer = None
 
 
 def handle_accepted_frame(filtered: FilteredFrame):
     """
     Called every time a frame passes the filter pipeline.
-
-    Phase 1: Just log it so we can verify the pipeline is working.
-    Phase 2: This will send the frame to the Gemini vision analyzer.
+    Sends the frame to Gemini for analysis and logs the result.
     """
     ft = filtered.frame_type.name.lower()
-    _frame_counter["total"] += 1
-    _frame_counter[ft] = _frame_counter.get(ft, 0) + 1
+
+    with _stats_lock:
+        _stats["frames_captured"] += 1
+        _stats[f"frames_{ft}"] = _stats.get(f"frames_{ft}", 0) + 1
 
     logger.info(
         f"[{filtered.frame.camera_name}] Frame accepted: "
-        f"type={ft}  motion={filtered.motion_score:.1f}%  "
-        f"total={_frame_counter['total']}  "
-        f"(motion={_frame_counter['motion']} "
-        f"hb={_frame_counter['heartbeat']} "
-        f"burst={_frame_counter['burst']})"
+        f"type={ft}  motion={filtered.motion_score:.1f}%"
     )
+
+    # Send to Gemini for analysis
+    result = _analyzer.analyze_frame(
+        filtered.frame.image,
+        camera_name=filtered.frame.camera_name,
+    )
+
+    with _stats_lock:
+        _stats["gemini_calls"] += 1
+
+    if result is None:
+        with _stats_lock:
+            _stats["gemini_failures"] += 1
+        logger.warning(f"[{filtered.frame.camera_name}] Analysis failed, skipping")
+        return
+
+    # Track stats
+    with _stats_lock:
+        if result.get("lee_visible"):
+            _stats["lee_visible"] += 1
+        if result.get("concern_level") in ("medium", "high"):
+            _stats["concerns"] += 1
+
+    # Log the activity detail
+    detail = result.get("activity_detail", "")
+    if detail:
+        logger.info(f"[{filtered.frame.camera_name}] → {detail}")
+
+    # TODO: Save to SQLite (Step 3)
+    # TODO: Trigger alert dispatcher on concern events (Step 5)
 
 
 # ---------------------------------------------------------------------------
@@ -59,13 +107,24 @@ def handle_accepted_frame(filtered: FilteredFrame):
 # ---------------------------------------------------------------------------
 
 def main():
+    global _analyzer
+
     logger.info("=" * 60)
     logger.info("  Gabriel — Starting up")
     logger.info("=" * 60)
 
+    # Validate API key
+    if not config.GEMINI_API_KEY:
+        logger.error("GEMINI_API_KEY not set. Add it to your .env file.")
+        sys.exit(1)
+
     # Ensure storage directories exist
     config.BASE_DIR.mkdir(parents=True, exist_ok=True)
     config.FRAMES_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Initialize vision analyzer
+    _analyzer = VisionAnalyzer()
+    logger.info("Gemini vision analyzer ready")
 
     # Start cameras
     capture_manager = CaptureManager()
@@ -111,8 +170,9 @@ def main():
     capture_manager.stop_all()
 
     logger.info("Final stats:")
-    for key, val in _frame_counter.items():
-        logger.info(f"  {key}: {val}")
+    with _stats_lock:
+        for key, val in _stats.items():
+            logger.info(f"  {key}: {val}")
 
     logger.info("Gabriel stopped. Goodbye!")
 
