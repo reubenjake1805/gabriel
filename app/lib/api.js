@@ -6,7 +6,7 @@
  */
 
 // UPDATE THIS to your Cloudflare tunnel URL
-const API_BASE = "https://conditioning-puzzle-went-trained.trycloudflare.com";
+const API_BASE = "https://api.gabrielcatwatch.xyz";
 
 /**
  * Ask Gabriel a question about Lee.
