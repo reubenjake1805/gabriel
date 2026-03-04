@@ -74,17 +74,6 @@ class ChatHandler:
         sessions = aggregate_sessions(events)
         event_summary = sessions_to_prompt(sessions)
 
-        # Collect frame paths from sessions
-        frames = []
-        for session in sessions:
-            for frame_path in session.get("frames", []):
-                if frame_path:
-                    frames.append({
-                        "timestamp": session["start_time"],
-                        "url": frame_path,
-                        "activity": session["activity"],
-                    })
-
         # Build the prompt for Claude
         local_tz = ZoneInfo(config.LOCAL_TIMEZONE)
         now = datetime.now(local_tz)
@@ -118,10 +107,13 @@ Please answer the user's question based on this data."""
                 "Please try again in a moment."
             )
 
+        # Pick frames relevant to the answer
+        frames = self._pick_relevant_frames(sessions, question, answer, is_realtime)
+
         return {
             "answer": answer,
             "events_used": len(events),
-            "frames": frames[:10],  # cap at 10 frames
+            "frames": frames,
             "is_realtime": is_realtime,
         }
 
@@ -183,3 +175,104 @@ Please answer the user's question based on this data."""
             "is lee okay", "is lee ok", "how is lee",
         ]
         return any(kw in q for kw in realtime_keywords)
+
+    def _pick_relevant_frames(
+        self,
+        sessions: list[dict],
+        question: str,
+        answer: str,
+        is_realtime: bool,
+    ) -> list[dict]:
+        """
+        Pick frames that are relevant to what Claude actually talked about.
+
+        Strategy:
+        1. For realtime queries: only show the 1-2 most recent frames
+        2. For activity-specific queries: show frames matching that activity
+        3. For general queries: show diverse frames from different activities
+           mentioned in Claude's answer
+        """
+        if not sessions:
+            return []
+
+        # For "right now" questions, just show the latest 2 frames
+        if is_realtime:
+            return self._get_latest_frames(sessions, count=2)
+
+        # Detect which activities Claude mentioned in the answer
+        answer_lower = answer.lower()
+        activity_keywords = {
+            "eating": ["eat", "ate", "eating", "food", "meal", "feeder", "bowl"],
+            "drinking": ["drink", "drinking", "water"],
+            "sleeping": ["sleep", "sleeping", "asleep", "nap", "napping", "snooze"],
+            "resting": ["rest", "resting", "lying", "relaxing", "cozy"],
+            "playing": ["play", "playing", "chasing", "toy"],
+            "grooming": ["groom", "grooming", "licking", "cleaning"],
+            "exploring": ["explor", "walking", "roaming", "wander"],
+            "climbing": ["climb", "climbing", "jumped", "perch"],
+            "running": ["run", "running", "sprint", "zoom"],
+            "using_litter_box": ["litter", "bathroom"],
+            "looking_outside": ["window", "outside", "looking out"],
+        }
+
+        # Find which activities Claude mentioned
+        mentioned_activities = set()
+        for activity, keywords in activity_keywords.items():
+            if any(kw in answer_lower for kw in keywords):
+                mentioned_activities.add(activity)
+
+        # Also check the question for activity hints
+        q_lower = question.lower()
+        for activity, keywords in activity_keywords.items():
+            if any(kw in q_lower for kw in keywords):
+                mentioned_activities.add(activity)
+
+        # Pick frames from mentioned activities
+        frames = []
+        if mentioned_activities:
+            for session in reversed(sessions):
+                if session["activity"] in mentioned_activities:
+                    frame = self._get_session_frame(session)
+                    if frame:
+                        frames.append(frame)
+                if len(frames) >= 4:
+                    break
+
+        # If we didn't find enough activity-specific frames, fill with recent ones
+        if len(frames) < 2:
+            recent = self._get_latest_frames(sessions, count=4)
+            # Add recent frames that aren't already included
+            existing_urls = {f["url"] for f in frames}
+            for f in recent:
+                if f["url"] not in existing_urls:
+                    frames.append(f)
+                if len(frames) >= 4:
+                    break
+
+        return frames[:6]
+
+    def _get_latest_frames(self, sessions: list[dict], count: int) -> list[dict]:
+        """Get the N most recent frames where Lee is visible."""
+        frames = []
+        for session in reversed(sessions):
+            if session.get("lee_visible") and session["activity"] != "not_visible":
+                frame = self._get_session_frame(session)
+                if frame:
+                    frames.append(frame)
+            if len(frames) >= count:
+                break
+        return frames
+
+    def _get_session_frame(self, session: dict) -> dict | None:
+        """Get the best frame from a session (the last one)."""
+        session_frames = session.get("frames", [])
+        if not session_frames:
+            return None
+        last_frame = session_frames[-1]
+        if not last_frame:
+            return None
+        return {
+            "timestamp": session["end_time"],
+            "url": last_frame,
+            "activity": session["activity"],
+        }

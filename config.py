@@ -12,8 +12,7 @@ from pathlib import Path
 # Camera
 # ---------------------------------------------------------------------------
 CAMERA_SOURCES = {
-    "webcam": 0,  # Phase 1: device index (MacBook built-in webcam)
-    # "living_room": "rtsp://user:pass@192.168.1.10/stream1",  # Phase 2
+    "living_room": "rtsp://aj_home:gabriel3007@192.168.1.15:554/av_stream/ch0",
 }
 
 # ---------------------------------------------------------------------------
