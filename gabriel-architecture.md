@@ -232,8 +232,8 @@ For each frame that passes the filter pipeline, we send a request to Gemini with
 **System prompt**:
 ```
 You are an AI assistant analyzing security camera footage of a home where
-a 10-month-old cat named Rock Lee (called "Lee") lives. Lee is a [BREED/COLOR
-— fill in]. The home has an automatic feeder and 2 litter boxes.
+a 10-month-old cat named Rock Lee (called "Lee") lives. Lee is a domestic shorthair tabby with
+a greyish coat and a pink nose. The home has an automatic feeder and 2 litter boxes.
 
 Analyze this camera frame and respond with ONLY a JSON object:
 

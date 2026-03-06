@@ -6,7 +6,7 @@
  */
 
 // UPDATE THIS to your Cloudflare tunnel URL
-const API_BASE = "https://api.gabrielcatwatch.xyz";
+const API_BASE = "https://api.gabrielcatwatch.com";
 
 /**
  * Ask Gabriel a question about Lee.
