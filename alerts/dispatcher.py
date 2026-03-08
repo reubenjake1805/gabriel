@@ -87,15 +87,15 @@ class AlertDispatcher:
             level = "CONCERN"
 
         message = (
-            f"{emoji} *Gabriel Alert — {level}*\n\n"
-            f"*Time:* {time_str}\n"
-            f"*Camera:* {camera}\n"
-            f"*Activity:* {activity}\n"
+            f"{emoji} <b>Gabriel Alert — {level}</b>\n\n"
+            f"<b>Time:</b> {time_str}\n"
+            f"<b>Camera:</b> {camera}\n"
+            f"<b>Activity:</b> {activity}\n"
         )
         if detail:
-            message += f"*Detail:* {detail}\n"
+            message += f"<b>Detail:</b> {detail}\n"
         if concern_detail:
-            message += f"*Concern:* {concern_detail}\n"
+            message += f"<b>Concern:</b> {concern_detail}\n"
         message += "\nPlease check the app for more details."
 
         self._send_telegram(message)
@@ -150,7 +150,7 @@ class AlertDispatcher:
             time_str = now_local.strftime("%-I:%M %p")
 
             message = (
-                f"🐱 *Gabriel*\n\n"
+                f"🐱 <b>Gabriel</b>\n\n"
                 f"I haven't seen Lee in about "
                 f"{config.INACTIVITY_ALERT_HOURS} hours "
                 f"(as of {time_str}). He might be in a spot the camera "
@@ -170,7 +170,7 @@ class AlertDispatcher:
                 json={
                     "chat_id": config.TELEGRAM_CHAT_ID,
                     "text": message,
-                    "parse_mode": "Markdown",
+                    "parse_mode": "HTML",
                 },
                 timeout=10,
             )
@@ -192,7 +192,7 @@ class AlertDispatcher:
             return False
 
         self._send_telegram(
-            "🐱 *Gabriel Test Alert*\n\n"
+            "🐱 <b>Gabriel Test Alert</b>\n\n"
             "If you're seeing this, Telegram alerts are working! "
             "Gabriel will notify you here if anything concerning "
             "happens with Lee."

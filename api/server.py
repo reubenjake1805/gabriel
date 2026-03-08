@@ -38,7 +38,7 @@ class ChatResponse(BaseModel):
 # App factory
 # ---------------------------------------------------------------------------
 
-def create_app(db: EventDB, capture_manager=None, analyzer=None) -> FastAPI:
+def create_app(db: EventDB, capture_manager=None, analyzer=None, frame_store=None) -> FastAPI:
     """
     Create the FastAPI app with all endpoints.
 
@@ -46,6 +46,7 @@ def create_app(db: EventDB, capture_manager=None, analyzer=None) -> FastAPI:
         db: The EventDB instance for querying events.
         capture_manager: The CaptureManager for live frames.
         analyzer: The VisionAnalyzer for on-demand analysis.
+        frame_store: The FrameStore for saving frames.
     """
     app = FastAPI(
         title="Gabriel",
@@ -53,7 +54,7 @@ def create_app(db: EventDB, capture_manager=None, analyzer=None) -> FastAPI:
         version="0.1.0",
     )
 
-    chat_handler = ChatHandler(db)
+    chat_handler = ChatHandler(db, capture_manager, analyzer, frame_store)
 
     # ------------------------------------------------------------------
     # POST /api/chat — Ask Gabriel a question

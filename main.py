@@ -271,6 +271,7 @@ def main():
         db=_db,
         capture_manager=_capture_manager,
         analyzer=_analyzer,
+        frame_store=_frame_store,
     )
 
     try:

@@ -44,8 +44,11 @@ Guidelines:
 class ChatHandler:
     """Handles natural-language questions about Lee using Claude."""
 
-    def __init__(self, db: EventDB):
+    def __init__(self, db: EventDB, capture_manager=None, analyzer=None, frame_store=None):
         self._db = db
+        self._capture_manager = capture_manager
+        self._analyzer = analyzer
+        self._frame_store = frame_store
         self._client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
         logger.info("Chat handler initialized")
 
@@ -67,12 +70,41 @@ class ChatHandler:
         since, until = self._infer_time_range(question)
         is_realtime = self._is_realtime_query(question)
 
+        # For realtime queries, grab fresh frames from all cameras
+        live_snapshots = []
+        if is_realtime and self._capture_manager and self._analyzer:
+            live_snapshots = self._capture_live_snapshots()
+
         # Pull events from the database
         events = self._db.get_events(since=since, until=until, limit=500)
 
         # Aggregate into sessions
         sessions = aggregate_sessions(events)
         event_summary = sessions_to_prompt(sessions)
+
+        # Add live snapshot info to the prompt
+        live_summary = ""
+        if live_snapshots:
+            live_lines = []
+            for snap in live_snapshots:
+                if snap["analysis"]:
+                    a = snap["analysis"]
+                    visible = "visible" if a.get("lee_visible") else "not visible"
+                    activity = a.get("activity", "unknown")
+                    detail = a.get("activity_detail", "")
+                    concern = a.get("concern_level", "none")
+                    live_lines.append(
+                        f"  [{snap['camera']}] Lee is {visible}. "
+                        f"Activity: {activity}. {detail} "
+                        f"(concern: {concern})"
+                    )
+                else:
+                    live_lines.append(f"  [{snap['camera']}] Analysis failed.")
+
+            live_summary = (
+                "\n\nLIVE SNAPSHOTS (just captured moments ago):\n"
+                + "\n".join(live_lines)
+            )
 
         # Build the prompt for Claude
         local_tz = ZoneInfo(config.LOCAL_TIMEZONE)
@@ -85,9 +117,9 @@ The user asks: "{question}"
 
 Here is the event log for Lee (aggregated into activity sessions):
 
-{event_summary}
+{event_summary}{live_summary}
 
-Please answer the user's question based on this data."""
+Please answer the user's question based on this data. If live snapshots are provided, prioritize that information for "right now" questions."""
 
         # Call Claude
         try:
@@ -109,6 +141,20 @@ Please answer the user's question based on this data."""
 
         # Pick frames relevant to the answer
         frames = self._pick_relevant_frames(sessions, question, answer, is_realtime)
+
+        # For realtime queries, prepend live snapshot frames
+        if live_snapshots:
+            live_frames = []
+            for snap in live_snapshots:
+                if snap.get("frame_path"):
+                    live_frames.append({
+                        "timestamp": snap["timestamp"],
+                        "url": snap["frame_path"],
+                        "activity": snap["analysis"].get("activity", "unknown") if snap["analysis"] else "unknown",
+                    })
+            # Live frames first, then historical
+            frames = live_frames + [f for f in frames if f["url"] not in {lf["url"] for lf in live_frames}]
+            frames = frames[:6]
 
         return {
             "answer": answer,
@@ -175,6 +221,60 @@ Please answer the user's question based on this data."""
             "is lee okay", "is lee ok", "how is lee",
         ]
         return any(kw in q for kw in realtime_keywords)
+
+    def _capture_live_snapshots(self) -> list[dict]:
+        """
+        Grab a fresh frame from each camera, analyze it with Gemini,
+        save it to disk and database. Returns list of snapshot dicts.
+        """
+        snapshots = []
+
+        for camera_name, camera in self._capture_manager.cameras.items():
+            if not camera.is_running:
+                continue
+
+            frame = camera.get_latest_frame()
+            if frame is None:
+                logger.warning(f"[{camera_name}] No frame available for live snapshot")
+                continue
+
+            logger.info(f"[{camera_name}] Capturing live snapshot for chat query")
+
+            # Analyze with Gemini
+            analysis = self._analyzer.analyze_frame(
+                frame.image,
+                camera_name=camera_name,
+            )
+
+            # Save frame to disk
+            frame_path = None
+            if self._frame_store:
+                frame_path = self._frame_store.save_frame(
+                    image=frame.image,
+                    camera_name=camera_name,
+                    timestamp=frame.timestamp,
+                    frame_type="live",
+                )
+
+            # Store in database
+            if analysis:
+                self._db.insert_event(
+                    timestamp=frame.timestamp,
+                    camera=camera_name,
+                    frame_type="live",
+                    analysis=analysis,
+                    frame_path=frame_path,
+                    motion_score=0.0,
+                )
+
+            snapshots.append({
+                "camera": camera_name,
+                "timestamp": frame.timestamp.isoformat(),
+                "analysis": analysis,
+                "frame_path": frame_path,
+            })
+
+        return snapshots
 
     def _pick_relevant_frames(
         self,
