@@ -4,20 +4,23 @@ import {
   TextInput,
   TouchableOpacity,
   FlatList,
-  KeyboardAvoidingView,
+  Keyboard,
   Platform,
   StyleSheet,
   ActivityIndicator,
-  Image,
+  Dimensions,
 } from "react-native";
-import { useState, useRef } from "react";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { useState, useRef, useEffect, useCallback } from "react";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 
 import ChatBubble from "../../components/ChatBubble";
 import StatusBar from "../../components/StatusBar";
-import { askGabriel, getLiveFrame, getFrameUrl } from "../../lib/api";
+import ImageViewer from "../../components/ImageViewer";
+import LiveFeed from "../../components/LiveFeed";
+import { askGabriel } from "../../lib/api";
 
 export default function ChatScreen() {
+  const insets = useSafeAreaInsets();
   const [messages, setMessages] = useState([
     {
       id: "welcome",
@@ -30,9 +33,28 @@ export default function ChatScreen() {
   ]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [liveFrame, setLiveFrame] = useState(null);
-  const [liveLoading, setLiveLoading] = useState(false);
+  const [showLive, setShowLive] = useState(false);
+  const [viewerImage, setViewerImage] = useState(null);
+  const [kbHeight, setKbHeight] = useState(0);
   const flatListRef = useRef(null);
+
+  useEffect(() => {
+    const sub1 = Keyboard.addListener(
+      Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow",
+      (e) => setKbHeight(e.endCoordinates.height)
+    );
+    const sub2 = Keyboard.addListener(
+      Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide",
+      () => setKbHeight(0)
+    );
+    return () => { sub1.remove(); sub2.remove(); };
+  }, []);
+
+  const scrollToEnd = useCallback(() => {
+    setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 150);
+  }, []);
+
+  useEffect(() => { scrollToEnd(); }, [messages, kbHeight]);
 
   function formatTime() {
     const now = new Date();
@@ -48,9 +70,8 @@ export default function ChatScreen() {
     if (!question || loading) return;
 
     setInput("");
-    setLiveFrame(null);
+    setShowLive(false);
 
-    // Add user message
     const userMsg = {
       id: `user-${Date.now()}`,
       role: "user",
@@ -59,13 +80,10 @@ export default function ChatScreen() {
       frames: [],
     };
     setMessages((prev) => [...prev, userMsg]);
-
-    // Show typing indicator
     setLoading(true);
 
     try {
       const result = await askGabriel(question);
-
       const gabrielMsg = {
         id: `gabriel-${Date.now()}`,
         role: "gabriel",
@@ -89,21 +107,15 @@ export default function ChatScreen() {
     }
   }
 
-  async function handleLiveView() {
-    setLiveLoading(true);
-    try {
-      const result = await getLiveFrame();
-      setLiveFrame(result);
-    } catch {
-      setLiveFrame(null);
-    } finally {
-      setLiveLoading(false);
-    }
-  }
+  // On Android, when keyboard is visible, we reduce the overall height
+  // by the keyboard height so the input bar stays visible
+  const bottomOffset = Platform.OS === "android" && kbHeight > 0
+    ? kbHeight - insets.bottom
+    : 0;
 
   return (
-    <SafeAreaView style={styles.safe} edges={["top"]}>
-      <View style={styles.container}>
+    <View style={styles.outerContainer}>
+      <SafeAreaView style={styles.safe} edges={["top"]}>
         {/* Header */}
         <View style={styles.header}>
           <Text style={styles.headerTitle}>Gabriel</Text>
@@ -113,21 +125,22 @@ export default function ChatScreen() {
         {/* Status bar */}
         <StatusBar />
 
-        {/* Chat messages */}
-        <KeyboardAvoidingView
-          style={styles.chatArea}
-          behavior={Platform.OS === "ios" ? "padding" : "height"}
-          keyboardVerticalOffset={0}
-        >
+        {/* Main content area that shrinks when keyboard appears */}
+        <View style={[styles.content, { marginBottom: bottomOffset }]}>
+          {/* Chat messages */}
           <FlatList
             ref={flatListRef}
             data={messages}
             keyExtractor={(item) => item.id}
-            renderItem={({ item }) => <ChatBubble message={item} />}
+            style={styles.chatList}
+            renderItem={({ item }) => (
+              <ChatBubble
+                message={item}
+                onImagePress={(url) => setViewerImage(url)}
+              />
+            )}
             contentContainerStyle={styles.messageList}
-            onContentSizeChange={() =>
-              flatListRef.current?.scrollToEnd({ animated: true })
-            }
+            keyboardShouldPersistTaps="handled"
             ListFooterComponent={
               loading ? (
                 <View style={styles.typingRow}>
@@ -140,35 +153,22 @@ export default function ChatScreen() {
             }
           />
 
-          {/* Live frame preview */}
-          {liveFrame && liveFrame.frame_url && (
-            <View style={styles.livePreview}>
-              <View style={styles.liveHeader}>
-                <Text style={styles.liveLabel}>📷 Live — {liveFrame.camera}</Text>
-                <TouchableOpacity onPress={() => setLiveFrame(null)}>
-                  <Text style={styles.liveClose}>✕</Text>
-                </TouchableOpacity>
-              </View>
-              <Image
-                source={{ uri: getFrameUrl(liveFrame.frame_url) }}
-                style={styles.liveImage}
-                resizeMode="contain"
-              />
-            </View>
-          )}
+          {/* Live feed */}
+          <LiveFeed
+            visible={showLive}
+            onClose={() => setShowLive(false)}
+          />
 
           {/* Input bar */}
-          <View style={styles.inputBar}>
+          <View style={[
+            styles.inputBar,
+            { paddingBottom: kbHeight > 0 ? 8 : Math.max(insets.bottom, 8) }
+          ]}>
             <TouchableOpacity
-              style={styles.liveButton}
-              onPress={handleLiveView}
-              disabled={liveLoading}
+              style={[styles.liveButton, showLive && styles.liveButtonActive]}
+              onPress={() => setShowLive(!showLive)}
             >
-              {liveLoading ? (
-                <ActivityIndicator size="small" color="#8E8E93" />
-              ) : (
-                <Text style={styles.liveButtonText}>📷</Text>
-              )}
+              <Text style={styles.liveButtonText}>📷</Text>
             </TouchableOpacity>
 
             <TextInput
@@ -193,20 +193,30 @@ export default function ChatScreen() {
               <Text style={styles.sendButtonText}>↑</Text>
             </TouchableOpacity>
           </View>
-        </KeyboardAvoidingView>
-      </View>
-    </SafeAreaView>
+        </View>
+      </SafeAreaView>
+
+      {/* Full-screen image viewer */}
+      <ImageViewer
+        visible={!!viewerImage}
+        imageUrl={viewerImage}
+        onClose={() => setViewerImage(null)}
+      />
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
+  outerContainer: {
+    flex: 1,
+    backgroundColor: "#000000",
+  },
   safe: {
     flex: 1,
     backgroundColor: "#000000",
   },
-  container: {
+  content: {
     flex: 1,
-    backgroundColor: "#000000",
   },
   header: {
     paddingHorizontal: 16,
@@ -224,7 +234,7 @@ const styles = StyleSheet.create({
     color: "#8E8E93",
     marginTop: 2,
   },
-  chatArea: {
+  chatList: {
     flex: 1,
   },
   messageList: {
@@ -248,40 +258,11 @@ const styles = StyleSheet.create({
     color: "#8E8E93",
     fontSize: 14,
   },
-  livePreview: {
-    marginHorizontal: 12,
-    marginBottom: 8,
-    backgroundColor: "#1C1C1E",
-    borderRadius: 12,
-    overflow: "hidden",
-  },
-  liveHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-  },
-  liveLabel: {
-    color: "#8E8E93",
-    fontSize: 12,
-  },
-  liveClose: {
-    color: "#636366",
-    fontSize: 16,
-    paddingHorizontal: 4,
-  },
-  liveImage: {
-    width: "100%",
-    height: 200,
-    backgroundColor: "#2C2C2E",
-  },
   inputBar: {
     flexDirection: "row",
     alignItems: "center",
     paddingHorizontal: 12,
-    paddingVertical: 8,
-    paddingBottom: Platform.OS === "ios" ? 24 : 8,
+    paddingTop: 8,
     backgroundColor: "#000000",
     borderTopWidth: 0.5,
     borderTopColor: "#1C1C1E",
@@ -294,6 +275,9 @@ const styles = StyleSheet.create({
     backgroundColor: "#1C1C1E",
     justifyContent: "center",
     alignItems: "center",
+  },
+  liveButtonActive: {
+    backgroundColor: "#0A84FF",
   },
   liveButtonText: {
     fontSize: 18,

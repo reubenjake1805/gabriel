@@ -161,6 +161,99 @@ def handle_accepted_frame(filtered: FilteredFrame):
 
 
 # ---------------------------------------------------------------------------
+# Burst sequence handler — analyze motion across frames
+# ---------------------------------------------------------------------------
+
+def handle_burst_sequence(frames: list, camera_name: str):
+    """
+    Called when burst mode ends with a collected sequence of frames.
+    Sends them to Gemini as a sequence for motion-aware analysis.
+    """
+    if not frames:
+        return
+
+    logger.info(
+        f"[{camera_name}] Burst sequence: analyzing {len(frames)} frames"
+    )
+
+    # Extract images from Frame objects
+    images = [f.image for f in frames]
+
+    # Send sequence to Gemini
+    if config.BURST_SEQUENCE_ANALYSIS:
+        result = _analyzer.analyze_sequence(images, camera_name=camera_name)
+    else:
+        # Fallback: just analyze the middle frame
+        mid = len(images) // 2
+        result = _analyzer.analyze_frame(images[mid], camera_name=camera_name)
+
+    with _stats_lock:
+        _stats["gemini_calls"] += 1
+
+    if result is None:
+        with _stats_lock:
+            _stats["gemini_failures"] += 1
+        logger.warning(f"[{camera_name}] Burst sequence analysis failed")
+        return
+
+    detail = result.get("activity_detail", "")
+    movement = result.get("movement_quality", "")
+    if detail:
+        logger.info(f"[{camera_name}] → {detail}")
+    if movement:
+        logger.info(f"[{camera_name}] → Movement: {movement}")
+
+    # Save the middle frame to disk as representative
+    mid_frame = frames[len(frames) // 2]
+    frame_path = _frame_store.save_frame(
+        image=mid_frame.image,
+        camera_name=camera_name,
+        timestamp=mid_frame.timestamp,
+        frame_type="burst",
+    )
+
+    # Check for concern → alert
+    concern = result.get("concern_level", "none")
+    context_frames_dir = None
+    if concern in ("medium", "high"):
+        with _stats_lock:
+            _stats["concerns"] += 1
+
+        # Save all burst frames as context
+        camera = _capture_manager.get_camera(camera_name)
+        if camera:
+            ring_frames = camera.get_ring_buffer()
+            if ring_frames:
+                context_frames_dir = _frame_store.save_ring_buffer(
+                    frames=ring_frames,
+                    camera_name=camera_name,
+                    trigger_timestamp=mid_frame.timestamp,
+                )
+
+        _alert_dispatcher.on_concern_event(
+            analysis=result,
+            camera=camera_name,
+            timestamp=mid_frame.timestamp,
+        )
+
+    # Store event in SQLite
+    _db.insert_event(
+        timestamp=mid_frame.timestamp,
+        camera=camera_name,
+        frame_type="burst_sequence",
+        analysis=result,
+        frame_path=frame_path,
+        context_frames_dir=context_frames_dir,
+        motion_score=0.0,
+    )
+
+    with _stats_lock:
+        _stats["events_stored"] += 1
+        if result.get("lee_visible"):
+            _stats["lee_visible"] += 1
+
+
+# ---------------------------------------------------------------------------
 # Periodic cleanup
 # ---------------------------------------------------------------------------
 
@@ -218,6 +311,7 @@ def main():
     for name, camera in _capture_manager.cameras.items():
         filt = FrameFilter(camera)
         filt.set_callback(handle_accepted_frame)
+        filt.set_burst_callback(handle_burst_sequence)
 
         t = threading.Thread(
             target=filt.run,

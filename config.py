@@ -35,9 +35,10 @@ HEARTBEAT_INTERVAL = 900        # seconds (15 min) between forced samples
 # Burst Mode
 # ---------------------------------------------------------------------------
 BURST_MOTION_THRESHOLD = 15.0   # % of pixels changed to trigger burst mode
-BURST_FPS = 4                   # capture rate during burst mode (normal: 1 fps)
+BURST_FPS = 12                  # capture rate during burst mode (normal: 1 fps)
 BURST_DURATION_SECONDS = 5      # how long burst mode lasts
-BURST_ANALYZE_COUNT = 6         # burst frames sent to Gemini (rest saved to disk only)
+BURST_ANALYZE_COUNT = 6         # frames picked from burst for sequence analysis
+BURST_SEQUENCE_ANALYSIS = True  # send burst frames as a sequence (not individually)
 
 # ---------------------------------------------------------------------------
 # Vision API (Gemini)

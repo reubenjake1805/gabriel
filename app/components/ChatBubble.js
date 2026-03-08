@@ -3,7 +3,7 @@ import { getFrameUrl } from "../lib/api";
 
 const screenWidth = Dimensions.get("window").width;
 
-export default function ChatBubble({ message }) {
+export default function ChatBubble({ message, onImagePress }) {
   const isUser = message.role === "user";
 
   return (
@@ -18,25 +18,28 @@ export default function ChatBubble({ message }) {
           {message.content}
         </Text>
 
-        {/* Frame thumbnails */}
         {message.frames && message.frames.length > 0 && (
           <View style={styles.framesRow}>
             {message.frames.slice(0, 4).map((frame, i) => {
               const url = getFrameUrl(frame.url);
               if (!url) return null;
               return (
-                <Image
+                <TouchableOpacity
                   key={i}
-                  source={{ uri: url }}
-                  style={styles.thumbnail}
-                  resizeMode="cover"
-                />
+                  onPress={() => onImagePress && onImagePress(url)}
+                  activeOpacity={0.7}
+                >
+                  <Image
+                    source={{ uri: url }}
+                    style={styles.thumbnail}
+                    resizeMode="cover"
+                  />
+                </TouchableOpacity>
               );
             })}
           </View>
         )}
 
-        {/* Timestamp */}
         <Text style={[styles.time, isUser ? styles.timeUser : styles.timeGabriel]}>
           {message.time}
         </Text>

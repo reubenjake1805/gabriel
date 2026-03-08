@@ -58,6 +58,44 @@ If Lee is not visible in the frame, set lee_visible to false, activity to "not_v
 and describe what you can see in the environment_notes field."""
 
 
+SEQUENCE_SYSTEM_PROMPT = """You are an AI assistant analyzing a SEQUENCE of security camera frames
+captured over a few seconds. A 10-month-old cat named Rock Lee (called "Lee") lives in this home.
+
+These frames are in chronological order, captured about 0.4 seconds apart. Analyze Lee's MOVEMENT
+across the sequence — not just one frame.
+
+Respond with ONLY a JSON object — no markdown, no code fences, no explanation:
+
+{
+  "lee_visible": boolean,
+  "lee_location": string or null,
+  "activity": string,
+  "activity_detail": string,
+  "posture": string or null,
+  "energy_level": string,
+  "movement_quality": string or null,
+  "concern_level": "none" | "low" | "medium" | "high",
+  "concern_detail": string or null,
+  "environment_notes": string or null
+}
+
+Field guidelines (same as single-frame, plus):
+- lee_visible: true if Lee is visible in ANY of the frames.
+- activity: one of: "eating", "drinking", "sleeping", "playing", "grooming", "using_litter_box", "exploring", "resting", "looking_outside", "running", "climbing", "hiding", "not_visible", "other"
+- activity_detail: describe what Lee is doing ACROSS the sequence (1-3 sentences). Note changes between frames.
+- movement_quality: describe how Lee is moving. Look for: normal gait, limping, favoring a leg, stumbling, unsteady, stiff, slow, fast, erratic, smooth. null if not moving or not visible.
+- concern_level: Pay special attention to movement abnormalities across frames:
+  - "none": normal movement, normal behavior
+  - "low": slightly unusual movement or behavior
+  - "medium": limping, unsteady gait, favoring a limb, unusual lethargy, repeated failed jumps
+  - "high": falling, seizure-like movement, inability to stand, dragging a limb, signs of acute distress
+- concern_detail: explain what you observed across the frames that concerns you. null if none.
+- energy_level: judge from the speed and nature of movement across frames.
+
+IMPORTANT: Compare frames to detect movement patterns. A single frame might look fine,
+but the sequence might reveal limping, stumbling, or other movement issues."""
+
+
 # ---------------------------------------------------------------------------
 # Analyzer
 # ---------------------------------------------------------------------------
@@ -72,7 +110,7 @@ class VisionAnalyzer:
 
     def analyze_frame(self, image, camera_name: str = "unknown") -> dict | None:
         """
-        Send a frame to Gemini for analysis.
+        Send a single frame to Gemini for analysis.
 
         Args:
             image: numpy array (BGR format from OpenCV)
@@ -84,30 +122,15 @@ class VisionAnalyzer:
         start_time = time.monotonic()
 
         try:
-            # Convert OpenCV BGR numpy array to PIL Image
-            rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            pil_image = Image.fromarray(rgb_image)
+            image_part = self._image_to_part(image)
 
-            # Compress to JPEG in memory
-            buffer = io.BytesIO()
-            pil_image.save(buffer, format="JPEG", quality=config.FRAME_JPEG_QUALITY)
-            buffer.seek(0)
-            jpeg_bytes = buffer.read()
-
-            # Build the image part
-            image_part = types.Part.from_bytes(
-                data=jpeg_bytes,
-                mime_type="image/jpeg",
-            )
-
-            # Send to Gemini
             response = self._client.models.generate_content(
                 model=self._model,
                 contents=[VISION_SYSTEM_PROMPT, image_part],
                 config=types.GenerateContentConfig(
                     temperature=0.1,
                     thinking_config=types.ThinkingConfig(
-                        thinking_budget=0,  # disable thinking for speed
+                        thinking_budget=0,
                     ),
                 ),
             )
@@ -115,24 +138,10 @@ class VisionAnalyzer:
             elapsed = time.monotonic() - start_time
             raw_text = response.text.strip()
 
-            # Parse JSON response
             result = self._parse_response(raw_text)
 
             if result:
-                activity = result.get("activity", "unknown")
-                concern = result.get("concern_level", "none")
-                visible = result.get("lee_visible", False)
-
-                log_msg = (
-                    f"[{camera_name}] Analyzed in {elapsed:.1f}s — "
-                    f"visible={visible}  activity={activity}  concern={concern}"
-                )
-                if concern in ("medium", "high"):
-                    logger.warning(log_msg)
-                else:
-                    logger.info(log_msg)
-
-                # Attach raw response for debugging
+                self._log_result(camera_name, result, elapsed)
                 result["_raw_response"] = raw_text
                 result["_analysis_time"] = round(elapsed, 2)
                 return result
@@ -149,6 +158,107 @@ class VisionAnalyzer:
                 f"[{camera_name}] Gemini API error ({elapsed:.1f}s): {e}"
             )
             return None
+
+    def analyze_sequence(self, images: list, camera_name: str = "unknown") -> dict | None:
+        """
+        Send a sequence of frames to Gemini for motion-aware analysis.
+        Used during burst mode to detect movement abnormalities like limping.
+
+        Args:
+            images: list of numpy arrays (BGR format from OpenCV), chronological order
+            camera_name: which camera these frames are from
+
+        Returns:
+            Parsed JSON dict with Lee's activity and movement analysis,
+            or None if analysis failed.
+        """
+        if not images:
+            return None
+
+        start_time = time.monotonic()
+
+        try:
+            # Build content: prompt + all images
+            contents = [SEQUENCE_SYSTEM_PROMPT]
+            for i, image in enumerate(images):
+                image_part = self._image_to_part(image)
+                contents.append(f"Frame {i + 1} of {len(images)}:")
+                contents.append(image_part)
+
+            response = self._client.models.generate_content(
+                model=self._model,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    thinking_config=types.ThinkingConfig(
+                        thinking_budget=0,
+                    ),
+                ),
+            )
+
+            elapsed = time.monotonic() - start_time
+            raw_text = response.text.strip()
+
+            result = self._parse_response(raw_text)
+
+            if result:
+                movement = result.get("movement_quality", "")
+                self._log_result(camera_name, result, elapsed, is_sequence=True)
+                if movement:
+                    logger.info(f"[{camera_name}] Movement: {movement}")
+
+                result["_raw_response"] = raw_text
+                result["_analysis_time"] = round(elapsed, 2)
+                result["_sequence_length"] = len(images)
+                return result
+            else:
+                logger.warning(
+                    f"[{camera_name}] Failed to parse sequence response "
+                    f"({elapsed:.1f}s): {raw_text[:200]}"
+                )
+                return None
+
+        except Exception as e:
+            elapsed = time.monotonic() - start_time
+            logger.error(
+                f"[{camera_name}] Gemini sequence API error ({elapsed:.1f}s): {e}"
+            )
+            return None
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _image_to_part(self, image):
+        """Convert an OpenCV BGR image to a Gemini image Part."""
+        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        pil_image = Image.fromarray(rgb_image)
+
+        buffer = io.BytesIO()
+        pil_image.save(buffer, format="JPEG", quality=config.FRAME_JPEG_QUALITY)
+        buffer.seek(0)
+        jpeg_bytes = buffer.read()
+
+        return types.Part.from_bytes(
+            data=jpeg_bytes,
+            mime_type="image/jpeg",
+        )
+
+    def _log_result(self, camera_name: str, result: dict, elapsed: float, is_sequence: bool = False):
+        """Log the analysis result."""
+        activity = result.get("activity", "unknown")
+        concern = result.get("concern_level", "none")
+        visible = result.get("lee_visible", False)
+        mode = "Sequence analyzed" if is_sequence else "Analyzed"
+
+        log_msg = (
+            f"[{camera_name}] {mode} in {elapsed:.1f}s — "
+            f"visible={visible}  activity={activity}  concern={concern}"
+        )
+        if concern in ("medium", "high"):
+            logger.warning(log_msg)
+        else:
+            logger.info(log_msg)
 
     def _parse_response(self, raw_text: str) -> dict | None:
         """

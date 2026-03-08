@@ -52,6 +52,7 @@ class BurstState:
         self.started_at = 0.0
         self.frames_captured = 0
         self.frames_analyzed = 0
+        self.collected_frames = []  # frames collected for sequence analysis
         self._lock = threading.Lock()
 
     def activate(self):
@@ -60,6 +61,7 @@ class BurstState:
             self.started_at = time.monotonic()
             self.frames_captured = 0
             self.frames_analyzed = 0
+            self.collected_frames = []
             logger.warning("BURST MODE activated")
 
     def deactivate(self):
@@ -67,7 +69,7 @@ class BurstState:
             self.active = False
             logger.info(
                 f"BURST MODE ended — captured {self.frames_captured} frames, "
-                f"analyzed {self.frames_analyzed}"
+                f"collected {len(self.collected_frames)} for sequence analysis"
             )
 
     @property
@@ -83,21 +85,27 @@ class BurstState:
             elapsed = time.monotonic() - self.started_at
             return elapsed >= config.BURST_DURATION_SECONDS
 
-    def should_analyze(self) -> bool:
+    def collect_frame(self, frame) -> bool:
         """
-        Decide whether this burst frame should be sent to Gemini.
-        We spread the BURST_ANALYZE_COUNT evenly across the burst window.
+        Collect a burst frame. Picks evenly spaced frames for sequence analysis.
+        Returns True if this frame was collected for the sequence.
         """
         with self._lock:
             if not self.active:
                 return False
             self.frames_captured += 1
             total_expected = config.BURST_FPS * config.BURST_DURATION_SECONDS
-            analyze_every = max(1, total_expected // config.BURST_ANALYZE_COUNT)
-            if self.frames_captured % analyze_every == 0:
-                self.frames_analyzed += 1
+            collect_every = max(1, total_expected // config.BURST_ANALYZE_COUNT)
+            if self.frames_captured % collect_every == 0:
+                self.collected_frames.append(frame)
                 return True
             return False
+
+    def get_collected_frames(self) -> list:
+        """Get the collected frames for sequence analysis."""
+        with self._lock:
+            frames = self.collected_frames[:]
+            return frames
 
 
 class FrameFilter:
@@ -113,8 +121,10 @@ class FrameFilter:
         self._last_analysis_time = 0.0
         self._burst = BurstState()
 
-        # Callback: called with a FilteredFrame whenever a frame passes
+        # Callback: called with a FilteredFrame for single-frame analysis
         self._on_frame_accepted = None
+        # Callback: called with a list of frames for sequence analysis
+        self._on_burst_sequence = None
 
     def set_callback(self, callback):
         """
@@ -126,6 +136,16 @@ class FrameFilter:
         """
         self._on_frame_accepted = callback
 
+    def set_burst_callback(self, callback):
+        """
+        Register a callback for burst sequence analysis.
+
+        Args:
+            callback: Callable[[list[Frame], str], None]
+                      (list of frames, camera_name)
+        """
+        self._on_burst_sequence = callback
+
     # ------------------------------------------------------------------
     # Main processing loop
     # ------------------------------------------------------------------
@@ -134,11 +154,6 @@ class FrameFilter:
         """
         Main loop: continuously pull the latest frame from the camera
         and run it through the filter pipeline.
-
-        This runs in its own thread, polling the camera at the capture
-        interval. It doesn't grab frames directly — the CameraStream
-        does that. This module just reads the latest frame and decides
-        whether it's worth analyzing.
         """
         logger.info(f"[{self.camera.name}] Filter pipeline started")
         last_processed_index = -1
@@ -174,16 +189,10 @@ class FrameFilter:
         gray = cv2.cvtColor(frame.image, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (config.MOTION_BLUR_KERNEL,) * 2, 0)
 
-        # ------ BURST MODE (bypass normal filtering) ------
+        # ------ BURST MODE (collect frames for sequence analysis) ------
         if self._burst.is_active:
-            if self._burst.should_analyze():
-                self._update_state(gray, frame)
-                return FilteredFrame(
-                    frame=frame,
-                    frame_type=FrameType.BURST,
-                    motion_score=self._compute_motion(gray),
-                )
-            return None  # burst frame saved to disk but not analyzed
+            self._burst.collect_frame(frame)
+            return None  # don't analyze individually during burst
 
         # ------ TIER 1: Motion Detection ------
         motion_score = self._compute_motion(gray)
@@ -282,6 +291,11 @@ class FrameFilter:
         self.camera.set_capture_interval(burst_interval)
 
     def _end_burst_mode(self):
-        """Deactivate burst mode: restore normal capture rate."""
+        """Deactivate burst mode: send collected frames for sequence analysis."""
+        collected = self._burst.get_collected_frames()
         self._burst.deactivate()
         self.camera.set_capture_interval(config.CAPTURE_INTERVAL)
+
+        # Send collected frames for sequence analysis
+        if collected and self._on_burst_sequence:
+            self._on_burst_sequence(collected, self.camera.name)
