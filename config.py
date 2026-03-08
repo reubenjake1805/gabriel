@@ -12,7 +12,8 @@ from pathlib import Path
 # Camera
 # ---------------------------------------------------------------------------
 CAMERA_SOURCES = {
-    "living_room": "rtsp://aj_home:gabriel3007@192.168.1.15:554/av_stream/ch0",
+    "living_room": "rtsp://aj_home:gabriel3007@192.168.1.14:554/av_stream/ch0",
+    "mezzanine": "rtsp://aj_home:gabriel3007@192.168.1.15:554/av_stream/ch0",
 }
 
 # ---------------------------------------------------------------------------
