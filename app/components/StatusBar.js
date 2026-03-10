@@ -2,13 +2,31 @@ import { View, Text, StyleSheet } from "react-native";
 import { useEffect, useState } from "react";
 import { getStatus } from "../lib/api";
 
+function formatTimeAgo(isoTimestamp) {
+  if (!isoTimestamp) return "";
+  try {
+    const eventTime = new Date(isoTimestamp);
+    const now = new Date();
+    const diffMs = now - eventTime;
+    const diffMin = Math.floor(diffMs / 60000);
+
+    if (diffMin < 1) return "just now";
+    if (diffMin < 60) return `${diffMin}m ago`;
+    const diffHrs = Math.floor(diffMin / 60);
+    if (diffHrs < 24) return `${diffHrs}h ago`;
+    return `${Math.floor(diffHrs / 24)}d ago`;
+  } catch {
+    return "";
+  }
+}
+
 export default function StatusBar() {
   const [status, setStatus] = useState(null);
   const [error, setError] = useState(false);
 
   useEffect(() => {
     fetchStatus();
-    const interval = setInterval(fetchStatus, 30000); // refresh every 30s
+    const interval = setInterval(fetchStatus, 30000);
     return () => clearInterval(interval);
   }, []);
 
@@ -39,24 +57,24 @@ export default function StatusBar() {
     );
   }
 
-  const today = status.today || {};
   const latest = status.latest_event;
   const lastActivity = latest ? latest.activity : "—";
+  const lastTime = latest ? formatTimeAgo(latest.timestamp) : "";
 
   return (
     <View style={styles.container}>
       <View style={[styles.dot, styles.dotOnline]} />
-      <Text style={styles.text}>
-        Online
-      </Text>
-      <Text style={styles.separator}>·</Text>
-      <Text style={styles.text}>
-        {today.total_events || 0} events today
-      </Text>
+      <Text style={styles.text}>Online</Text>
       {latest && (
         <>
           <Text style={styles.separator}>·</Text>
           <Text style={styles.text}>Last: {lastActivity}</Text>
+          {lastTime ? (
+            <>
+              <Text style={styles.separator}>·</Text>
+              <Text style={styles.text}>{lastTime}</Text>
+            </>
+          ) : null}
         </>
       )}
     </View>

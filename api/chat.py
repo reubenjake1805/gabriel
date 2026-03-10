@@ -284,13 +284,13 @@ Please answer the user's question based on this data. If live snapshots are prov
         is_realtime: bool,
     ) -> list[dict]:
         """
-        Pick frames that are relevant to what Claude actually talked about.
+        Pick frames that are relevant to the user's question.
 
         Strategy:
         1. For realtime queries: only show the 1-2 most recent frames
-        2. For activity-specific queries: show frames matching that activity
-        3. For general queries: show diverse frames from different activities
-           mentioned in Claude's answer
+        2. If the question asks about a specific activity (eating, sleeping, etc),
+           ONLY show frames from that activity
+        3. For general questions: show diverse recent frames where Lee is visible
         """
         if not sessions:
             return []
@@ -299,57 +299,42 @@ Please answer the user's question based on this data. If live snapshots are prov
         if is_realtime:
             return self._get_latest_frames(sessions, count=2)
 
-        # Detect which activities Claude mentioned in the answer
-        answer_lower = answer.lower()
         activity_keywords = {
-            "eating": ["eat", "ate", "eating", "food", "meal", "feeder", "bowl"],
-            "drinking": ["drink", "drinking", "water"],
-            "sleeping": ["sleep", "sleeping", "asleep", "nap", "napping", "snooze"],
-            "resting": ["rest", "resting", "lying", "relaxing", "cozy"],
-            "playing": ["play", "playing", "chasing", "toy"],
-            "grooming": ["groom", "grooming", "licking", "cleaning"],
-            "exploring": ["explor", "walking", "roaming", "wander"],
+            "eating": ["eat", "ate", "eating", "food", "meal", "feeder", "bowl", "dinner", "lunch", "breakfast", "fed"],
+            "drinking": ["drink", "drinking", "water", "thirsty"],
+            "sleeping": ["sleep", "sleeping", "asleep", "nap", "napping", "snooze", "slept"],
+            "resting": ["rest", "resting", "lying", "relaxing", "cozy", "cuddle"],
+            "playing": ["play", "playing", "chasing", "toy", "played"],
+            "grooming": ["groom", "grooming", "licking", "cleaning", "groomed"],
+            "exploring": ["explor", "walking", "roaming", "wander", "walked"],
             "climbing": ["climb", "climbing", "jumped", "perch"],
-            "running": ["run", "running", "sprint", "zoom"],
-            "using_litter_box": ["litter", "bathroom"],
+            "running": ["run", "running", "sprint", "zoom", "ran"],
+            "using_litter_box": ["litter", "bathroom", "poop", "pee"],
             "looking_outside": ["window", "outside", "looking out"],
         }
 
-        # Find which activities Claude mentioned
-        mentioned_activities = set()
-        for activity, keywords in activity_keywords.items():
-            if any(kw in answer_lower for kw in keywords):
-                mentioned_activities.add(activity)
-
-        # Also check the question for activity hints
+        # First: check the QUESTION for a specific activity
         q_lower = question.lower()
+        question_activities = set()
         for activity, keywords in activity_keywords.items():
             if any(kw in q_lower for kw in keywords):
-                mentioned_activities.add(activity)
+                question_activities.add(activity)
 
-        # Pick frames from mentioned activities
-        frames = []
-        if mentioned_activities:
+        # If the question is about a specific activity, ONLY show those frames
+        if question_activities:
+            frames = []
             for session in reversed(sessions):
-                if session["activity"] in mentioned_activities:
+                if session["activity"] in question_activities:
                     frame = self._get_session_frame(session)
                     if frame:
                         frames.append(frame)
                 if len(frames) >= 4:
                     break
+            if frames:
+                return frames[:4]
 
-        # If we didn't find enough activity-specific frames, fill with recent ones
-        if len(frames) < 2:
-            recent = self._get_latest_frames(sessions, count=4)
-            # Add recent frames that aren't already included
-            existing_urls = {f["url"] for f in frames}
-            for f in recent:
-                if f["url"] not in existing_urls:
-                    frames.append(f)
-                if len(frames) >= 4:
-                    break
-
-        return frames[:6]
+        # General question: show diverse recent frames where Lee is visible
+        return self._get_latest_frames(sessions, count=4)
 
     def _get_latest_frames(self, sessions: list[dict], count: int) -> list[dict]:
         """Get the N most recent frames where Lee is visible."""
