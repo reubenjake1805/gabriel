@@ -37,4 +37,12 @@ export function getFrameUrl(framePath, bustCache = false) {
   return url;
 }
 
+export function getAudioUrl(clipPath) {
+  if (!clipPath) return null;
+  const parts = clipPath.split("/");
+  const filename = parts[parts.length - 1];
+  const date = parts[parts.length - 2];
+  return `${API_BASE}/api/audio/${date}/${filename}`;
+}
+
 export { API_BASE };

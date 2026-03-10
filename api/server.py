@@ -176,4 +176,17 @@ def create_app(db: EventDB, capture_manager=None, analyzer=None, frame_store=Non
             raise HTTPException(status_code=404, detail="Frame not found")
         return FileResponse(str(filepath), media_type="image/jpeg")
 
+    # ------------------------------------------------------------------
+    # GET /api/audio/{date}/{filename} — Serve an audio clip
+    # ------------------------------------------------------------------
+
+    @app.get("/api/audio/{date}/{filename}")
+    async def serve_audio(date: str, filename: str):
+        """Serve a saved audio WAV clip."""
+        audio_dir = config.BASE_DIR / "audio"
+        filepath = audio_dir / date / filename
+        if not filepath.exists():
+            raise HTTPException(status_code=404, detail="Audio clip not found")
+        return FileResponse(str(filepath), media_type="audio/wav")
+
     return app

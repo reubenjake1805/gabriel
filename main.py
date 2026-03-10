@@ -9,6 +9,7 @@ import sys
 import signal
 import logging
 import threading
+from datetime import datetime
 
 from dotenv import load_dotenv
 load_dotenv()  # Load .env before importing config
@@ -22,6 +23,7 @@ from analysis.vision import VisionAnalyzer
 from storage.database import EventDB
 from storage.frames import FrameStore
 from alerts.dispatcher import AlertDispatcher
+from audio.capture import AudioManager
 from api.server import create_app
 
 # ---------------------------------------------------------------------------
@@ -63,6 +65,7 @@ _db: EventDB = None
 _frame_store: FrameStore = None
 _capture_manager: CaptureManager = None
 _alert_dispatcher: AlertDispatcher = None
+_audio_manager: AudioManager = None
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +344,37 @@ def main():
         daemon=True,
     )
     inactivity_thread.start()
+
+    # Audio monitor
+    _audio_manager = AudioManager()
+
+    def handle_sound_detected(camera_name, clip_path, duration, timestamp_iso):
+        """Called when significant audio is detected."""
+        logger.info(
+            f"[{camera_name}] Sound detected: {duration:.1f}s clip saved to {clip_path}"
+        )
+        # Store audio event in database
+        audio_analysis = {
+            "lee_visible": True,
+            "lee_location": camera_name,
+            "activity": "vocalizing",
+            "activity_detail": f"Sound detected from {camera_name} camera ({duration:.1f}s clip)",
+            "posture": None,
+            "energy_level": "medium",
+            "concern_level": "none",
+            "concern_detail": None,
+            "environment_notes": f"Audio clip: {clip_path}",
+        }
+        _db.insert_event(
+            timestamp=datetime.fromisoformat(timestamp_iso),
+            camera=camera_name,
+            frame_type="audio",
+            analysis=audio_analysis,
+            frame_path=clip_path,  # reuse frame_path for audio clip path
+            motion_score=0.0,
+        )
+
+    _audio_manager.start_all(shutdown_event, callback=handle_sound_detected)
 
     # Graceful shutdown on Ctrl+C
     def signal_handler(sig, frame):
