@@ -28,12 +28,17 @@ logger = logging.getLogger(__name__)
 AUDIO_SAMPLE_RATE = 8000       # matches camera's PCM A-law output
 AUDIO_CHANNELS = 1
 AUDIO_CHUNK_SECONDS = 1        # analyze audio in 1-second chunks
-NOISE_THRESHOLD_DB = -25       # dB threshold — sounds above this are "significant"
-MIN_SOUND_DURATION = 0.5       # minimum seconds of sound to save a clip
+NOISE_THRESHOLD_DB = -30       # dB threshold — sounds above this are "significant"
+MIN_SOUND_DURATION = 1.5       # minimum seconds of sound to save a clip
 PRE_SOUND_BUFFER = 2           # seconds of audio to keep before the sound starts
 POST_SOUND_SECONDS = 2         # seconds to keep recording after sound drops
 MAX_CLIP_SECONDS = 30          # maximum clip length
 CLIP_FORMAT = "wav"
+
+# Frequency filtering — cat vocalizations are typically 500-2000 Hz
+# Doors, drawers, footsteps are mostly below 300 Hz
+HIGH_FREQ_MIN_HZ = 400        # minimum frequency to consider "high-pitched"
+HIGH_FREQ_RATIO = 0.3         # at least 30% of energy must be above HIGH_FREQ_MIN_HZ
 
 
 class AudioMonitor:
@@ -140,7 +145,9 @@ class AudioMonitor:
             # Calculate RMS volume in dB
             db_level = self._calculate_db(raw_data)
 
-            is_sound = db_level > NOISE_THRESHOLD_DB
+            is_loud = db_level > NOISE_THRESHOLD_DB
+            is_high_pitched = self._is_high_pitched(raw_data) if is_loud else False
+            is_sound = is_loud and is_high_pitched
 
             if not recording:
                 # Keep a rolling pre-buffer
@@ -156,7 +163,13 @@ class AudioMonitor:
                     silence_countdown = POST_SOUND_SECONDS
                     sound_start_time = datetime.now(timezone.utc)
                     logger.info(
-                        f"[{self._camera_name}] Sound detected ({db_level:.1f} dB)"
+                        f"[{self._camera_name}] Sound detected "
+                        f"({db_level:.1f} dB, high-freq)"
+                    )
+                elif is_loud:
+                    logger.debug(
+                        f"[{self._camera_name}] Low-freq sound ignored "
+                        f"({db_level:.1f} dB)"
                     )
             else:
                 # Currently recording
@@ -216,6 +229,39 @@ class AudioMonitor:
         # Convert to dB (relative to max 16-bit value)
         db = 20 * math.log10(rms / 32768.0)
         return db
+
+    def _is_high_pitched(self, raw_data: bytes) -> bool:
+        """
+        Check if the sound has significant energy above HIGH_FREQ_MIN_HZ.
+        Uses FFT to analyze frequency content.
+        Cat meows are typically 500-2000 Hz.
+        Door slams, footsteps, drawers are mostly below 300 Hz.
+        """
+        import numpy as np
+
+        num_samples = len(raw_data) // 2
+        if num_samples == 0:
+            return False
+
+        samples = np.array(
+            struct.unpack(f"<{num_samples}h", raw_data),
+            dtype=np.float64,
+        )
+
+        # Apply FFT
+        fft_result = np.abs(np.fft.rfft(samples))
+        freqs = np.fft.rfftfreq(num_samples, d=1.0 / AUDIO_SAMPLE_RATE)
+
+        # Calculate energy in high-frequency band vs total
+        total_energy = np.sum(fft_result ** 2)
+        if total_energy == 0:
+            return False
+
+        high_freq_mask = freqs >= HIGH_FREQ_MIN_HZ
+        high_energy = np.sum(fft_result[high_freq_mask] ** 2)
+
+        ratio = high_energy / total_energy
+        return ratio >= HIGH_FREQ_RATIO
 
     def _save_clip(self, chunks: list, timestamp: datetime) -> str | None:
         """Save audio chunks as a WAV file."""

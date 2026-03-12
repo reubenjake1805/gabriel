@@ -76,7 +76,14 @@ class ChatHandler:
             live_snapshots = self._capture_live_snapshots()
 
         # Pull events from the database
-        events = self._db.get_events(since=since, until=until, limit=500)
+        # Exclude audio events unless the question is about sounds
+        is_sound_query = self._is_sound_query(question)
+        events = self._db.get_events(
+            since=since,
+            until=until,
+            limit=500,
+            exclude_frame_type=None if is_sound_query else "audio",
+        )
 
         # Aggregate into sessions
         sessions = aggregate_sessions(events)
@@ -221,6 +228,15 @@ Please answer the user's question based on this data. If live snapshots are prov
             "is lee okay", "is lee ok", "how is lee",
         ]
         return any(kw in q for kw in realtime_keywords)
+
+    def _is_sound_query(self, question: str) -> bool:
+        """Check if the question is about sounds or audio."""
+        q = question.lower()
+        sound_keywords = [
+            "sound", "noise", "hear", "heard", "meow", "hiss",
+            "cry", "vocal", "audio", "loud", "bark", "purr",
+        ]
+        return any(kw in q for kw in sound_keywords)
 
     def _capture_live_snapshots(self) -> list[dict]:
         """

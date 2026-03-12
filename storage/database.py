@@ -155,6 +155,7 @@ class EventDB:
         concern_level: str = None,
         camera: str = None,
         lee_visible: bool = None,
+        exclude_frame_type: str = None,
         limit: int = 500,
     ) -> list[dict]:
         """
@@ -167,6 +168,7 @@ class EventDB:
             concern_level: Filter by concern level (e.g. "high").
             camera: Filter by camera name.
             lee_visible: Filter by whether Lee was visible.
+            exclude_frame_type: Exclude events of this frame_type (e.g. "audio").
             limit: Max rows to return.
 
         Returns:
@@ -193,6 +195,9 @@ class EventDB:
         if lee_visible is not None:
             conditions.append("lee_visible = ?")
             params.append(1 if lee_visible else 0)
+        if exclude_frame_type:
+            conditions.append("frame_type != ?")
+            params.append(exclude_frame_type)
 
         where_clause = ""
         if conditions:
