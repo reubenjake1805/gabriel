@@ -38,7 +38,7 @@ CLIP_FORMAT = "wav"
 # Frequency filtering — cat vocalizations are typically 500-2000 Hz
 # Doors, drawers, footsteps are mostly below 300 Hz
 HIGH_FREQ_MIN_HZ = 400        # minimum frequency to consider "high-pitched"
-HIGH_FREQ_RATIO = 0.3         # at least 30% of energy must be above HIGH_FREQ_MIN_HZ
+HIGH_FREQ_RATIO = 0.5         # at least 30% of energy must be above HIGH_FREQ_MIN_HZ
 
 
 class AudioMonitor:
